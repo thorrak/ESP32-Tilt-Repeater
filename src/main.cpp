@@ -5,8 +5,8 @@
 
 /*--- USER SETTINGS ---*/
 int SCAN_TIME =     5;          // Duration to scan for bluetooth devices (in seconds).
-int TIME_TO_SLEEP = 1800;       // Duration ESP32 will go to sleep between scans (in seconds).
-int fastSleep =     4;          // Scan more often if no Tilts are found. TIME_TO_SLEEP(1800) / fastSleep(4) = scan every 7.5 minutes. Use 1 to disable.
+int TIME_TO_SLEEP = 15;       // Duration ESP32 will go to sleep between scans (in seconds).
+int fastSleep =     1;          // Scan more often if no Tilts are found. TIME_TO_SLEEP(1800) / fastSleep(4) = scan every 7.5 minutes. Use 1 to disable.
 int repeatColour =  0;          // Choose Tilt colour to repeat. 0=All, 1=Red, 2=Green, 3=Black, 4=Purple, 5=Orange, 6=Blue, 7=Yellow, 8=Pink.
 int scanPower =     9;          // Transmition power level while scanning. Values can be 3 (+3dbm/Default), 6 (+6dbm) or 9 (+9dbm).
 int repeatPower =   9;          // Transmition power level while repeating. Values can be 3 (+3dbm/Default), 6 (+6dbm) or 9 (+9dbm).
@@ -21,7 +21,7 @@ bool Celsius =      true;       // Use Celcius while logging to serial.
 /*--- INCLUDES ---*/
 #include "BLEDevice.h"
 #include "BLEBeacon.h"
-#include "esp_deep_sleep.h"
+#include "esp_sleep.h"
 
 #ifdef SSD1306_MODULE
   #include "SSD1306.h"
@@ -263,7 +263,7 @@ void setup() {
     esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
   }
 
-  esp_deep_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
   
   Serial.print("Going to sleep for ");
   if (!tiltCount || !colourFound) {
