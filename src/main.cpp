@@ -13,31 +13,10 @@ int repeatPower =   9;          // Transmition power level while repeating. Valu
 bool Celsius =      true;       // Use Celcius while logging to serial.
 
 
-//#define LOLIN32_OLED          // Uncomment to enable use of the Wemos Lolin32 OLED display. SDA = Pin D5, SCL = Pin D4
-//#define I2C_16X2              // Uncomment to enable use of the i2c 16x2 LCD display. SDA = Pin D21, SCL = Pin D22
-//#define SSD1306_MODULE        // Uncomment to enable use of the i2c SSD1306 OLED module. SDA = Pin D21, SCL = Pin D22
-
-
 /*--- INCLUDES ---*/
 #include "BLEDevice.h"
 #include "BLEBeacon.h"
 #include "esp_sleep.h"
-
-#ifdef SSD1306_MODULE
-  #include "SSD1306.h"
-  SSD1306 display(0x3c, 21, 22); 
-#endif
-
-#ifdef LOLIN32_OLED
-  #include "SSD1306.h"
-  SSD1306  display(0x3c, 5, 4);
-#endif
-
-#ifdef I2C_16X2
-  #include <Wire.h>
-  #include <LiquidCrystal_I2C.h>
-  LiquidCrystal_I2C lcd(0x27, 16, 2);
-#endif
 
 int uS_TO_S_FACTOR = 1000000;
 BLEAdvertising *pAdvertising;
@@ -153,22 +132,6 @@ int parseTilt(String DevData) {
   Serial.println(DevGravityFormatted, 3);
   Serial.println(DevData);
   Serial.println("--------------------------------");
-  
-  #if defined(LOLIN32_OLED) || defined(SSD1306_MODULE)
-    display.clear();
-    display.drawString(64, 5, (DevColour + " Tilt"));
-    display.drawString(64, 25, ("Temp: " + SerialTemp));
-    display.drawString(64, 45, ("Gravity: " + String(DevGravityFormatted, 3)));
-    display.display();
-  #endif
-  
-  #ifdef I2C_16X2
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print((DevColour + " " + SerialTemp));
-    lcd.setCursor(0, 1);
-    lcd.print("Gravity: " + String(DevGravityFormatted, 3));
-  #endif
 
   BLEDevice::init("");
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, powerLevels[repeatPower]);
@@ -195,25 +158,6 @@ void setup() {
 
   Serial.println();
   Serial.println("Scanning...");
-
-  #if defined(LOLIN32_OLED) || defined(SSD1306_MODULE)
-    display.init();
-    display.flipScreenVertically();
-    display.setFont(ArialMT_Plain_16);
-    display.setColor(WHITE);
-    display.setTextAlignment(TEXT_ALIGN_CENTER);
-    display.clear();
-    display.drawString(64, 5, ("Scanning..."));
-    display.display();
-  #endif
-
-  #ifdef I2C_16X2
-    lcd.init();
-    lcd.backlight();
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Scanning...");
-  #endif
 
   BLEScanResults foundDevices = pBLEScan->start(SCAN_TIME);
   deviceCount = foundDevices.getCount();
@@ -246,17 +190,6 @@ void setup() {
 
   if (!tiltCount || !colourFound) {
     Serial.println("No Tilts Repeated.");
-    #if defined(LOLIN32_OLED) || defined(SSD1306_MODULE)
-      display.clear();
-      display.drawString(64, 5, ("No Tilts Found."));
-      display.display();
-    #endif
-  
-    #ifdef I2C_16X2
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("No Tilts Found.");
-    #endif
     esp_sleep_enable_timer_wakeup((TIME_TO_SLEEP/fastSleep) * uS_TO_S_FACTOR);
   }
   else {
