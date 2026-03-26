@@ -1,0 +1,2 @@
+dependencies:
+  h2zero/esp-nimble-cpp: "^2.3.4"
