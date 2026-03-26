@@ -7,6 +7,7 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
+#include "esp_mac.h"
 #include "NimBLEDevice.h"
 
 static const char *TAG = "tilt";
@@ -38,6 +39,7 @@ typedef struct {
     uint16_t gravity;     // Specific gravity * 1000
     uint8_t uuid[16];
     uint8_t addr[6];
+    uint8_t addr_type;    // BLE_ADDR_PUBLIC or BLE_ADDR_RANDOM
     int rssi;
 } tilt_data_t;
 
@@ -92,6 +94,7 @@ class ScanCallbacks : public NimBLEScanCallbacks {
         tilt.gravity = ((uint8_t)mfr[22] << 8) | (uint8_t)mfr[23];
         tilt.rssi    = device->getRSSI();
         memcpy(tilt.addr, device->getAddress().getVal(), 6);
+        tilt.addr_type = device->getAddress().getType();
 
         log_tilt(&tilt);
     }
@@ -100,6 +103,22 @@ class ScanCallbacks : public NimBLEScanCallbacks {
 static ScanCallbacks scan_callbacks;
 
 static void advertise_tilt(const tilt_data_t *tilt) {
+    // Spoof advertising address to match the original Tilt's MAC and address type
+    if (tilt->addr_type == BLE_ADDR_PUBLIC) {
+        // Reverse NimBLE LSB-first to ESP-IDF MSB-first byte order
+        uint8_t mac[6];
+        for (int j = 0; j < 6; j++) mac[j] = tilt->addr[5 - j];
+        NimBLEDevice::deinit();
+        esp_iface_mac_addr_set(mac, ESP_MAC_BT);
+        NimBLEDevice::init("");
+    } else {
+        uint8_t rnd_addr[6];
+        memcpy(rnd_addr, tilt->addr, 6);
+        rnd_addr[5] |= 0xC0;  // Set top 2 bits for valid random static address
+        NimBLEDevice::setOwnAddr(rnd_addr);
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+    }
+
     // Build iBeacon manufacturer data payload (25 bytes)
     uint8_t mfr_data[25];
     mfr_data[0] = 0x4C;  // Apple company ID (LE)
