@@ -53,10 +53,10 @@ jobs:
     - name: Copy files
       run: |
         if [ -f .pio/build/esp32dev/firmware.bin ]; then
-        cp .pio/build/esp32dev/firmware.bin bin/esp32dev_firmware.bin
+        cp .pio/build/esp32dev/firmware.bin ./esp32dev_firmware.bin
         fi
         if [ -f .pio/build/esp32dev/partitions.bin ]; then
-        cp .pio/build/esp32dev/partitions.bin bin/esp32dev_partitions.bin
+        cp .pio/build/esp32dev/partitions.bin ./esp32dev_partitions.bin
         fi
 
     - name: Create Draft Release
@@ -68,6 +68,6 @@ jobs:
         prerelease: true
         files: |
           LICENSE
-          bin/*.bin
+          ./*.bin
       env:
         GITHUB_REPOSITORY: thorrak/ESP32-Tilt-Repeater
