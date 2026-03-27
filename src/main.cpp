@@ -2,20 +2,19 @@
 // Original by David Gray, rewritten for ESP-IDF with NimBLE
 
 #include <cstring>
+#include <vector>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
-#include "esp_sleep.h"
+#include "esp_timer.h"
 #include "esp_mac.h"
 #include "NimBLEDevice.h"
 
 static const char *TAG = "tilt";
 
 /*--- USER SETTINGS ---*/
-#define SCAN_TIME_S       5       // Duration to scan for BLE devices (seconds)
-#define SLEEP_TIME_S      15      // Duration to deep sleep between scans (seconds)
-#define FAST_SLEEP_DIV    1       // Divide sleep time when no Tilts found (1 = disable)
+#define REPEAT_INTERVAL_S 15      // Minimum seconds between rebroadcasts per Tilt per message type
 #define REPEAT_COLOUR     0       // 0=All, 1=Red, 2=Green, 3=Black, 4=Purple, 5=Orange, 6=Blue, 7=Yellow, 8=Pink
 #define SCAN_POWER_DBM    9       // TX power in dBm while scanning
 #define REPEAT_POWER_DBM  9       // TX power in dBm while repeating
@@ -37,32 +36,81 @@ typedef struct {
     uint8_t colour;       // 1-8
     uint16_t temp_f;      // Temperature in Fahrenheit
     uint16_t gravity;     // Specific gravity * 1000
+    bool is_version_msg;  // true if temp==999 (version/info message)
     uint8_t uuid[16];
     uint8_t addr[6];
     uint8_t addr_type;    // BLE_ADDR_PUBLIC or BLE_ADDR_RANDOM
     int rssi;
 } tilt_data_t;
 
-#define MAX_TILTS 8
-static tilt_data_t found_tilts[MAX_TILTS];
-static int tilt_count = 0;
-static int device_count = 0;
+typedef struct {
+    uint8_t colour;       // 1-8
+    uint8_t addr[6];      // BLE MAC address
+    int64_t last_rebroadcast_readings_us;  // Last rebroadcast of a temp/gravity message
+    int64_t last_rebroadcast_version_us;   // Last rebroadcast of a version/info message (temp==999)
+} tilt_device_t;
+
+static std::vector<tilt_device_t> tracked_tilts;
+
+#define MAX_PENDING 32  // 8 colours × 2 message types x 2 (why not)
+static tilt_data_t pending_tilts[MAX_PENDING];
+static int pending_count = 0;
+
+static tilt_device_t* find_tracked_tilt(uint8_t colour, const uint8_t *addr) {
+    for (auto &t : tracked_tilts) {
+        if (t.colour == colour && memcmp(t.addr, addr, 6) == 0)
+            return &t;
+    }
+    return nullptr;
+}
+
+static bool should_rebroadcast(uint8_t colour, const uint8_t *addr, bool is_version_msg) {
+    tilt_device_t *tracked = find_tracked_tilt(colour, addr);
+    if (!tracked) return true;
+
+    int64_t now = esp_timer_get_time();
+    int64_t interval = (int64_t)REPEAT_INTERVAL_S * 1000000LL;
+    int64_t last = is_version_msg ? tracked->last_rebroadcast_version_us
+                                  : tracked->last_rebroadcast_readings_us;
+    return (now - last) >= interval;
+}
+
+static void update_tracked_tilt(const tilt_data_t *tilt) {
+    int64_t now = esp_timer_get_time();
+    tilt_device_t *tracked = find_tracked_tilt(tilt->colour, tilt->addr);
+
+    if (!tracked) {
+        tilt_device_t entry = {};
+        entry.colour = tilt->colour;
+        memcpy(entry.addr, tilt->addr, 6);
+        if (tilt->is_version_msg)
+            entry.last_rebroadcast_version_us = now;
+        else
+            entry.last_rebroadcast_readings_us = now;
+        tracked_tilts.push_back(entry);
+    } else {
+        if (tilt->is_version_msg)
+            tracked->last_rebroadcast_version_us = now;
+        else
+            tracked->last_rebroadcast_readings_us = now;
+    }
+}
 
 static void log_tilt(const tilt_data_t *tilt) {
-    ESP_LOGI(TAG, "--------------------------------");
-    ESP_LOGI(TAG, "Colour: %s", COLOUR_NAMES[tilt->colour]);
-    ESP_LOGI(TAG, "Temp: %dF", tilt->temp_f);
-    ESP_LOGI(TAG, "Gravity: %.3f", tilt->gravity / 1000.0f);
-    ESP_LOGI(TAG, "RSSI: %d", tilt->rssi);
-    ESP_LOGI(TAG, "--------------------------------");
+    if (tilt->is_version_msg) {
+        ESP_LOGI(TAG, "Received %s Tilt version info (fw=%d, RSSI=%d)",
+                 COLOUR_NAMES[tilt->colour], tilt->gravity, tilt->rssi);
+    } else {
+        ESP_LOGI(TAG, "Received %s Tilt readings (temp=%dF, gravity=%.3f, RSSI=%d)",
+                 COLOUR_NAMES[tilt->colour], tilt->temp_f, tilt->gravity / 1000.0f, tilt->rssi);
+    }
 }
 
 class ScanCallbacks : public NimBLEScanCallbacks {
-    void onDiscovered(const NimBLEAdvertisedDevice *device) override {
-        device_count++;
+    void onResult(const NimBLEAdvertisedDevice *device) override {
 
         std::string mfr = device->getManufacturerData();
-        if (mfr.length() < 25) return;
+        if (mfr.length() < 24) return;
 
         // Check Apple iBeacon header: company ID 0x004C, type 0x0215
         if ((uint8_t)mfr[0] != 0x4C || (uint8_t)mfr[1] != 0x00 ||
@@ -76,24 +124,31 @@ class ScanCallbacks : public NimBLEScanCallbacks {
         uint8_t colour = uuid[3] >> 4;
         if (colour < 1 || colour > 8) return;
 
-        if (REPEAT_COLOUR != 0 && REPEAT_COLOUR != colour) {
-            ESP_LOGI(TAG, "%s Tilt ignored (colour filter).", COLOUR_NAMES[colour]);
-            return;
-        }
+        if (REPEAT_COLOUR != 0 && REPEAT_COLOUR != colour) return;
 
-        // Skip duplicate colours
-        for (int i = 0; i < tilt_count; i++) {
-            if (found_tilts[i].colour == colour) return;
-        }
-        if (tilt_count >= MAX_TILTS) return;
+        const uint8_t *addr = device->getAddress().getVal();
+        uint16_t temp_f  = ((uint8_t)mfr[20] << 8) | (uint8_t)mfr[21];
+        bool is_version = (temp_f == 999);
 
-        tilt_data_t &tilt = found_tilts[tilt_count++];
+        // Check if this colour+addr+msg_type needs rebroadcasting
+        if (!should_rebroadcast(colour, addr, is_version)) return;
+
+        // Skip if already pending for this colour+addr+msg_type
+        for (int i = 0; i < pending_count; i++) {
+            if (pending_tilts[i].colour == colour &&
+                pending_tilts[i].is_version_msg == is_version &&
+                memcmp(pending_tilts[i].addr, addr, 6) == 0) return;
+        }
+        if (pending_count >= MAX_PENDING) return;
+
+        tilt_data_t &tilt = pending_tilts[pending_count++];
         tilt.colour  = colour;
         memcpy(tilt.uuid, uuid, 16);
-        tilt.temp_f  = ((uint8_t)mfr[20] << 8) | (uint8_t)mfr[21];
+        tilt.temp_f  = temp_f;
         tilt.gravity = ((uint8_t)mfr[22] << 8) | (uint8_t)mfr[23];
+        tilt.is_version_msg = is_version;
         tilt.rssi    = device->getRSSI();
-        memcpy(tilt.addr, device->getAddress().getVal(), 6);
+        memcpy(tilt.addr, addr, 6);
         tilt.addr_type = device->getAddress().getType();
 
         log_tilt(&tilt);
@@ -142,7 +197,8 @@ static void advertise_tilt(const tilt_data_t *tilt) {
     NimBLEDevice::setPower(REPEAT_POWER_DBM, NimBLETxPowerType::Advertise);
 
     pAdv->start();
-    ESP_LOGI(TAG, "Advertising %s Tilt", COLOUR_NAMES[tilt->colour]);
+    ESP_LOGI(TAG, "Rebroadcasting %s Tilt %s", COLOUR_NAMES[tilt->colour],
+             tilt->is_version_msg ? "version info" : "readings");
     vTaskDelay(pdMS_TO_TICKS(100));
     pAdv->stop();
 }
@@ -155,40 +211,39 @@ extern "C" void app_main(void) {
     }
 
     NimBLEDevice::init("");
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
+    NimBLEDevice::setPower(SCAN_POWER_DBM, NimBLETxPowerType::Scan);
+
+    NimBLEScan *pScan = NimBLEDevice::getScan();
+    pScan->setScanCallbacks(&scan_callbacks);
+    pScan->setActiveScan(false);
+    pScan->setDuplicateFilter(false);
+    pScan->setMaxResults(0);
+
+    ESP_LOGI(TAG, "Starting continuous scan...");
+    pScan->start(0);  // 0 = scan indefinitely
 
     while (true) {
-        tilt_count = 0;
-        device_count = 0;
+        vTaskDelay(pdMS_TO_TICKS(100));
 
-        NimBLEDevice::setPower(SCAN_POWER_DBM, NimBLETxPowerType::Scan);
+        if (pending_count == 0) continue;
 
-        NimBLEScan *pScan = NimBLEDevice::getScan();
-        pScan->setScanCallbacks(&scan_callbacks);
-        pScan->setActiveScan(true);
-        pScan->setMaxResults(0);
-
-        ESP_LOGI(TAG, "Scanning...");
-        pScan->start(SCAN_TIME_S * 1000);
+        // Stop scan so no callbacks fire while we rebroadcast
+        pScan->stop();
         while (pScan->isScanning()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
 
-        ESP_LOGI(TAG, "%d devices found, %d Tilt(s).", device_count, tilt_count);
-
-        for (int i = 0; i < tilt_count; i++) {
-            advertise_tilt(&found_tilts[i]);
+        int count = pending_count;
+        for (int i = 0; i < count; i++) {
+            advertise_tilt(&pending_tilts[i]);
+            update_tracked_tilt(&pending_tilts[i]);
         }
+        ESP_LOGI(TAG, "Rebroadcast %d message(s).", count);
+        pending_count = 0;
 
-        if (tilt_count == 0) {
-            ESP_LOGI(TAG, "No Tilts repeated.");
-        }
-
-        int sleep_time = (tilt_count > 0) ? SLEEP_TIME_S : (SLEEP_TIME_S / FAST_SLEEP_DIV);
-        ESP_LOGI(TAG, "Sleeping for %d seconds", sleep_time);
-
-        NimBLEDevice::deinit();
-        esp_sleep_enable_timer_wakeup((uint64_t)sleep_time * 1000000ULL);
-        esp_light_sleep_start();
-        NimBLEDevice::init("");
+        // Resume scanning
+        NimBLEDevice::setPower(SCAN_POWER_DBM, NimBLETxPowerType::Scan);
+        pScan->start(0);
     }
 }
